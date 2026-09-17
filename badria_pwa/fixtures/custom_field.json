@@ -44,5 +44,54 @@
   "sort_options": 0,
   "translatable": 0,
   "unique": 0
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Item",
+  "name": "Item-custom_packing_automation_section",
+  "fieldname": "custom_packing_automation_section",
+  "fieldtype": "Section Break",
+  "label": "Packing Automation",
+  "insert_after": "include_item_in_manufacturing",
+  "collapsible": 1,
+  "collapsible_depends_on": "eval:doc.custom_enable_packing_automation",
+  "module": "Badria PWA App"
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Item",
+  "name": "Item-custom_enable_packing_automation",
+  "fieldname": "custom_enable_packing_automation",
+  "fieldtype": "Check",
+  "label": "Enable Packing Automation",
+  "insert_after": "custom_packing_automation_section",
+  "default": "0",
+  "description": "When checked, Manufacture Stock Entries for this item automatically consume the packing materials configured below.",
+  "module": "Badria PWA App"
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Item",
+  "name": "Item-custom_pieces_per_carton",
+  "fieldname": "custom_pieces_per_carton",
+  "fieldtype": "Int",
+  "label": "Pieces Per Carton",
+  "insert_after": "custom_enable_packing_automation",
+  "depends_on": "eval:doc.custom_enable_packing_automation",
+  "mandatory_depends_on": "eval:doc.custom_enable_packing_automation",
+  "non_negative": 1,
+  "module": "Badria PWA App"
+ },
+ {
+  "doctype": "Custom Field",
+  "dt": "Item",
+  "name": "Item-custom_packing_materials",
+  "fieldname": "custom_packing_materials",
+  "fieldtype": "Table",
+  "label": "Packing Materials",
+  "options": "Packing Material Rule",
+  "insert_after": "custom_pieces_per_carton",
+  "depends_on": "eval:doc.custom_enable_packing_automation",
+  "module": "Badria PWA App"
  }
 ]
