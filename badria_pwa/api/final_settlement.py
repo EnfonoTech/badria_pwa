@@ -40,7 +40,7 @@ def _compute_settlement(doc):
 
     salary_structure, basic_salary = _get_salary_structure_assignment(employee, to_date)
 
-    working_days = _get_attendance(employee, from_date, to_date)
+    working_days = _get_attendance(employee, from_date, to_date, settlement_type)
 
     if settlement_type == "Sales":
         type_fields = {**_production_field_defaults(), **_compute_sales_incentive(doc, from_date, to_date)}
@@ -52,8 +52,10 @@ def _compute_settlement(doc):
             employee, from_date, to_date, minimum_production_per_day
         )
         # Below-minimum days do NOT reduce Working Days or Total Basic Salary -
-        # only actual Attendance absences do that. Below-minimum only reduces
-        # the incentive (per the client's confirmed formula).
+        # only actual Attendance absences do that. Below-minimum instead comes
+        # off Gross Settlement directly as its own deduction line (per the
+        # client's confirmed formula), not folded into the incentive or the
+        # basic salary figure.
         above_minimum_days = max(0.0, working_days - below_minimum_days)
 
         type_fields = {
@@ -84,10 +86,10 @@ def _compute_settlement(doc):
     gross_settlement = (
         total_basic_salary
         + incentive_for_gross
-        + below_minimum_incentive_amount
         + other_allowances
         + other_additions
         - other_deductions
+        - below_minimum_incentive_amount
     )
 
     total_advance_paid = _get_total_advance_paid(employee, from_date, to_date)
@@ -175,6 +177,9 @@ def _compute_sales_incentive(doc, from_date, to_date):
 
     vat_percentage = flt(doc.vat_percentage) or 15
 
+    # Total Sales Amount (Grand Total) is VAT-inclusive: back out VAT the same way.
+    total_sales_amount_excl_vat = flt(total_sales_amount / (1 + vat_percentage / 100), 2)
+
     # Total Cash Collected is VAT-inclusive: Net Sales = Cash Collected / (1 + VAT%).
     net_sales = flt(total_cash_collected / (1 + vat_percentage / 100), 2)
     vat_amount = total_cash_collected - net_sales
@@ -191,6 +196,7 @@ def _compute_sales_incentive(doc, from_date, to_date):
 
     return {
         "total_sales_amount": total_sales_amount,
+        "total_sales_amount_excl_vat": total_sales_amount_excl_vat,
         "total_cash_collected": total_cash_collected,
         "total_outstanding_amount": total_outstanding_amount,
         "collection_percentage": collection_percentage,
@@ -208,6 +214,7 @@ def _compute_sales_incentive(doc, from_date, to_date):
 def _sales_field_defaults():
     return {
         "total_sales_amount": 0.0,
+        "total_sales_amount_excl_vat": 0.0,
         "total_cash_collected": 0.0,
         "total_outstanding_amount": 0.0,
         "collection_percentage": 0.0,
@@ -238,25 +245,55 @@ def _get_salary_structure_assignment(employee, as_of_date):
     return rows[0].salary_structure, flt(rows[0].base)
 
 
-def _get_attendance(employee, from_date, to_date):
+def _get_attendance(employee, from_date, to_date, settlement_type="Production"):
+    # Production has no paid-leave concept - only "Present"/"Half Day" attendance
+    # count towards payment days, so "On Leave" rows are ignored entirely (same
+    # as Absent) for that settlement type. Sales settlements are eligible for
+    # paid leave, so payment days there also include "On Leave" days whose
+    # Leave Type is not Leave Without Pay (full pay), or Partially Paid Leave
+    # (fractional pay via Leave Type.fraction_of_daily_salary_per_leave).
     Attendance = frappe.qb.DocType("Attendance")
     rows = (
         frappe.qb.from_(Attendance)
-        .select(Attendance.status, Count(Attendance.name).as_("count"))
+        .select(Attendance.status, Attendance.leave_type, Count(Attendance.name).as_("count"))
         .where(Attendance.employee == employee)
         .where(Attendance.docstatus == 1)
         .where(Attendance.attendance_date.between(from_date, to_date))
-        .groupby(Attendance.status)
+        .groupby(Attendance.status, Attendance.leave_type)
     ).run(as_dict=True)
 
     present_days = 0.0
     half_days = 0.0
+    leave_counts = {}
     for row in rows:
         if row.status == "Present":
-            present_days = flt(row["count"])
+            present_days += flt(row["count"])
         elif row.status == "Half Day":
-            half_days = flt(row["count"])
-    return present_days + half_days * 0.5
+            half_days += flt(row["count"])
+        elif row.status == "On Leave" and settlement_type == "Sales":
+            leave_counts[row.leave_type] = leave_counts.get(row.leave_type, 0.0) + flt(row["count"])
+
+    payment_days = present_days + half_days * 0.5
+
+    if leave_counts:
+        leave_type_info = {
+            lt.name: lt
+            for lt in frappe.get_all(
+                "Leave Type",
+                filters={"name": ["in", list(leave_counts.keys())]},
+                fields=["name", "is_lwp", "is_ppl", "fraction_of_daily_salary_per_leave"],
+            )
+        }
+        for leave_type, count in leave_counts.items():
+            lt = leave_type_info.get(leave_type)
+            if lt and lt.is_lwp:
+                continue  # Leave Without Pay - unpaid, do not add to payment days.
+            elif lt and lt.is_ppl:
+                payment_days += count * flt(lt.fraction_of_daily_salary_per_leave)
+            else:
+                payment_days += count  # fully paid leave
+
+    return payment_days
 
 
 def _get_total_production(employee, from_date, to_date):
@@ -365,14 +402,18 @@ def create_employee_incentive(name):
     if doc.docstatus != 1:
         frappe.throw(_("Final Settlement must be submitted before creating an Employee Incentive."))
 
-    payroll_date = doc.posting_date or doc.to_date
+    # Posting Date defaults to "Today" and is almost never blank, so using it here
+    # would date these records by whenever HR happened to process the settlement
+    # rather than the period the settlement actually covers - they must land in
+    # the settlement's own payroll period (to_date) to reach the right Salary Slip.
+    payroll_date = doc.to_date
 
-    main_incentive_amount = (
-        flt(doc.total_incentive) if doc.settlement_type == "Sales" else flt(doc.incentive_amount)
-    )
-    below_minimum_incentive_amount = (
-        flt(doc.below_minimum_incentive_amount) if doc.settlement_type != "Sales" else 0.0
-    )
+    if doc.settlement_type == "Sales":
+        main_incentive_amount = flt(doc.fixed_incentive_amount)
+        main_salary_component = doc.sales_incentive_salary_component or "Basic"
+    else:
+        main_incentive_amount = flt(doc.incentive_amount)
+        main_salary_component = doc.incentive_salary_component or "Basic"
     other_incentive_amount = flt(doc.other_allowances) + flt(doc.other_additions)
 
     created = {}
@@ -381,16 +422,17 @@ def create_employee_incentive(name):
         doc,
         link_field="employee_incentive",
         amount=main_incentive_amount,
-        salary_component=doc.incentive_salary_component or "Basic",
+        salary_component=main_salary_component,
         payroll_date=payroll_date,
     )
-    created["below_minimum_employee_incentive"] = _create_one_employee_incentive(
-        doc,
-        link_field="below_minimum_employee_incentive",
-        amount=below_minimum_incentive_amount,
-        salary_component=doc.below_minimum_salary_component or "Basic",
-        payroll_date=payroll_date,
-    )
+    if doc.settlement_type == "Sales":
+        created["performance_employee_incentive"] = _create_one_employee_incentive(
+            doc,
+            link_field="performance_employee_incentive",
+            amount=flt(doc.performance_incentive_amount),
+            salary_component=doc.performance_incentive_salary_component or "Basic",
+            payroll_date=payroll_date,
+        )
     created["other_employee_incentive"] = _create_one_employee_incentive(
         doc,
         link_field="other_employee_incentive",
@@ -398,11 +440,50 @@ def create_employee_incentive(name):
         salary_component=doc.other_salary_component or "Basic",
         payroll_date=payroll_date,
     )
+    created["below_minimum_deduction"] = _create_below_minimum_deduction(doc, payroll_date)
 
     if not any(created.values()):
         frappe.throw(_("There is no incentive/allowance amount greater than zero to create."))
 
     return created
+
+
+def _create_below_minimum_deduction(doc, payroll_date):
+    if doc.settlement_type == "Sales":
+        return None
+
+    below_minimum_amount = flt(doc.below_minimum_incentive_amount)
+    if below_minimum_amount <= 0:
+        return None
+
+    if doc.below_minimum_deduction:
+        # Already created - skip silently rather than block the other incentives.
+        return doc.below_minimum_deduction
+
+    if not doc.below_minimum_salary_component:
+        frappe.throw(_("Below Minimum Salary Component is required to create its deduction."))
+
+    from hrms.payroll.doctype.salary_structure_assignment.salary_structure_assignment import (
+        get_employee_currency,
+    )
+
+    additional_salary = frappe.new_doc("Additional Salary")
+    additional_salary.employee = doc.employee
+    additional_salary.company = doc.company
+    additional_salary.currency = get_employee_currency(doc.employee)
+    additional_salary.salary_component = doc.below_minimum_salary_component
+    additional_salary.overwrite_salary_structure_amount = 0
+    additional_salary.amount = below_minimum_amount
+    additional_salary.payroll_date = payroll_date
+    additional_salary.ref_doctype = doc.doctype
+    additional_salary.ref_docname = doc.name
+    additional_salary.insert()
+
+    frappe.db.set_value(
+        "Final Settlement", doc.name, "below_minimum_deduction", additional_salary.name, update_modified=False
+    )
+
+    return additional_salary.name
 
 
 def _create_one_employee_incentive(doc, link_field, amount, salary_component, payroll_date):

@@ -30,6 +30,7 @@ def execute(filters=None):
 		warehouse=warehouse,
 		user=user,
 		company=filters.get("company"),
+		customer=filters.get("customer"),
 	)
 	totals = result["totals"]
 	report_summary = _summary_cards(

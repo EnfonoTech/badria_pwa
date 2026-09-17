@@ -31,6 +31,7 @@
   "additional_production",
   "incentive_rate",
   "incentive_amount",
+  "incentive_salary_component",
   "section_break_below_minimum",
   "below_minimum_days",
   "below_minimum_quantity",
@@ -39,6 +40,7 @@
   "below_minimum_salary_component",
   "section_break_sales",
   "total_sales_amount",
+  "total_sales_amount_excl_vat",
   "total_cash_collected",
   "total_outstanding_amount",
   "column_break_sales_totals",
@@ -49,15 +51,16 @@
   "net_sales",
   "fixed_incentive_percentage",
   "fixed_incentive_amount",
+  "sales_incentive_salary_component",
   "performance_incentive_percentage",
   "performance_incentive_amount",
+  "performance_incentive_salary_component",
   "total_incentive",
   "section_break_earnings",
+  "other_salary_component",
   "other_deductions",
   "other_allowances",
   "other_additions",
-  "incentive_salary_component",
-  "other_salary_component",
   "column_break_earnings",
   "total_basic_salary",
   "gross_settlement",
@@ -71,8 +74,10 @@
   "column_break_status",
   "section_break_incentive_records",
   "employee_incentive",
+  "performance_employee_incentive",
   "below_minimum_employee_incentive",
-  "other_employee_incentive"
+  "other_employee_incentive",
+  "below_minimum_deduction"
  ],
  "fields": [
   {
@@ -281,6 +286,7 @@
    "fieldname": "below_minimum_salary_component",
    "fieldtype": "Link",
    "label": "Below Minimum Salary Component",
+   "mandatory_depends_on": "eval:doc.settlement_type=='Production' && doc.below_minimum_incentive_amount > 0",
    "options": "Salary Component"
   },
   {
@@ -295,6 +301,15 @@
    "fieldname": "total_sales_amount",
    "fieldtype": "Currency",
    "label": "Total Sales Amount",
+   "options": "Company:company:default_currency",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.settlement_type=='Sales'",
+   "description": "Total Sales Amount with VAT backed out: Grand Total / (1 + VAT %).",
+   "fieldname": "total_sales_amount_excl_vat",
+   "fieldtype": "Currency",
+   "label": "Total Sales Amount (Excl. VAT)",
    "options": "Company:company:default_currency",
    "read_only": 1
   },
@@ -505,10 +520,29 @@
   },
   {
    "allow_on_submit": 1,
-   "description": "Used for the main incentive amount on Create Employee Incentive - Incentive on Additional Production for Production settlements, Total Achieved Incentive for Sales settlements.",
+   "depends_on": "eval:doc.settlement_type=='Production'",
+   "description": "Used for the main incentive amount on Create Employee Incentive - Incentive on Additional Production.",
    "fieldname": "incentive_salary_component",
    "fieldtype": "Link",
    "label": "Incentive Salary Component",
+   "options": "Salary Component"
+  },
+  {
+   "allow_on_submit": 1,
+   "depends_on": "eval:doc.settlement_type=='Sales'",
+   "description": "Used for the Fixed Incentive Amount on Create Employee Incentive.",
+   "fieldname": "sales_incentive_salary_component",
+   "fieldtype": "Link",
+   "label": "Fixed Incentive Salary Component",
+   "options": "Salary Component"
+  },
+  {
+   "allow_on_submit": 1,
+   "depends_on": "eval:doc.settlement_type=='Sales'",
+   "description": "Used for the Performance Incentive Amount on Create Employee Incentive.",
+   "fieldname": "performance_incentive_salary_component",
+   "fieldtype": "Link",
+   "label": "Performance Incentive Salary Component",
    "options": "Salary Component"
   },
   {
@@ -519,10 +553,20 @@
    "options": "Salary Component"
   },
   {
-   "description": " Employee Incentive created from the 20-and-above incentive amount.",
+   "description": " Employee Incentive created from the 20-and-above incentive amount (Production) or the Fixed Incentive Amount (Sales).",
    "fieldname": "employee_incentive",
    "fieldtype": "Link",
    "label": "Employee Incentive",
+   "no_copy": 1,
+   "options": "Employee Incentive",
+   "read_only": 1
+  },
+  {
+   "depends_on": "eval:doc.settlement_type=='Sales'",
+   "description": "Employee Incentive created from the Performance Incentive Amount.",
+   "fieldname": "performance_employee_incentive",
+   "fieldtype": "Link",
+   "label": "Performance Employee Incentive",
    "no_copy": 1,
    "options": "Employee Incentive",
    "read_only": 1
@@ -543,6 +587,15 @@
    "label": "Other Employee Incentive",
    "no_copy": 1,
    "options": "Employee Incentive",
+   "read_only": 1
+  },
+  {
+   "description": "Additional Salary (Deduction component) created from the Below Minimum Incentive Amount.",
+   "fieldname": "below_minimum_deduction",
+   "fieldtype": "Link",
+   "label": "Below Minimum Deduction",
+   "no_copy": 1,
+   "options": "Additional Salary",
    "read_only": 1
   }
  ],

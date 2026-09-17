@@ -4,5 +4,8 @@
 
 [post_model_sync]
 # Patches added in this section will be executed after doctypes are migrated
-badria_pwa.patches.v1_0.set_default_settlement_type
 badria_pwa.patches.v1_0.create_incentive_salary_component
+badria_pwa.patches.v1_0.create_fixed_divisor_salary_structure
+badria_pwa.patches.v1_0.fix_daily_wage_double_proration
+badria_pwa.patches.v1_0.cancel_unused_fixed_divisor_structure
+badria_pwa.patches.v1_0.cleanup_old_stock_entry_shift_info

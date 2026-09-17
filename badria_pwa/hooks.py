@@ -34,7 +34,6 @@ doctype_js = {
     "Stock Entry": "public/js/stock_entry.js",
 }
 
-# Custom Field Stock Entry.custom_production_template — re-applied on migrate.
 fixtures = [
 	"Client Script",
 	{

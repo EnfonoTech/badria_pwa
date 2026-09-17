@@ -7,6 +7,14 @@
 # determines ownership of a transaction here - NOT the Sales Person on the
 # Sales Team child table (Sales Person is still shown as an informational
 # column, but is never used to scope or attribute a row to someone).
+#
+# Date scope: from_date/to_date filter by when payment was actually RECEIVED
+# (Payment Entry posting_date), not by the Sales Invoice's own posting_date.
+# An invoice raised outside the range still appears if it was paid inside the
+# range, and only the portion paid inside the range counts as collected -
+# this is what makes the numbers mean "cash collected this period" for
+# commission/incentive purposes. Standalone returns (Part 2 below) have no
+# equivalent payment event, so they remain scoped by their own posting_date.
 
 import frappe
 from frappe.utils import flt
@@ -24,17 +32,24 @@ def get_permitted_warehouses_for_user(user):
 
 
 def get_sales_collection_data(
-	from_date, to_date, warehouse=None, user=None, employee=None, sales_person=None, company=None
+	from_date, to_date, warehouse=None, user=None, employee=None, sales_person=None, company=None,
+	customer=None,
 ):
 	"""Return per-invoice rows plus aggregate totals for the given scope.
+
+	`from_date`/`to_date` scope by when payment was RECEIVED (Payment Entry
+	posting_date), not by the Sales Invoice's own posting_date - an invoice
+	raised outside the range still appears if paid inside it, and only the
+	portion paid inside the range is counted as collected.
 
 	Ownership/ scope is warehouse-based: pass `warehouse` directly, or `user`
 	(resolved to every warehouse assigned to that user via User Permission), or
 	`employee` (resolved to their linked user, then the same way). `sales_person`
 	may additionally be passed as a secondary filter for convenience, but is
 	never used on its own to determine ownership. `company` is an optional
-	additional restriction. Raises if no scoping dimension resolves to
-	anything, since an unscoped org-wide pull is never the intent here.
+	additional restriction. `customer` is an optional additional restriction to
+	a single customer. Raises if no scoping dimension resolves to anything,
+	since an unscoped org-wide pull is never the intent here.
 	"""
 	if employee and not user:
 		user = frappe.db.get_value("Employee", employee, "user_id")
@@ -48,7 +63,7 @@ def get_sales_collection_data(
 			"an assigned warehouse (via User Permission), or a sales_person to scope by."
 		)
 
-	query, params = _build_query(from_date, to_date, warehouse, sales_person, company)
+	query, params = _build_query(from_date, to_date, warehouse, sales_person, company, customer)
 	rows = frappe.db.sql(query, params, as_dict=True)
 
 	total_sales_amount = flt(sum(flt(r.invoice_grand_total) for r in rows), 2)
@@ -79,11 +94,35 @@ def _scope_join(invoice_alias, warehouse, sales_person, param_prefix):
 	if warehouse:
 		alias = f"{param_prefix}_wh"
 		operator = "IN" if isinstance(warehouse, (list, tuple, set)) else "="
+		# Source Warehouse determination (never Item Warehouse): when the invoice
+		# updates stock itself, its own warehouse is authoritative; otherwise stock
+		# moved via a separate Delivery Note, so that DN's warehouse is the source.
+		# Matching on Sales Invoice Item.warehouse directly misses every invoice
+		# delivered this second way, which is how a user's collected payments went
+		# missing from the Sales Collection Report / Final Settlement.
 		joins.append(f"""
     INNER JOIN (
-        SELECT DISTINCT parent AS invoice_name
-        FROM `tabSales Invoice Item`
-        WHERE warehouse {operator} %({param_prefix}_warehouse)s
+        SELECT DISTINCT inv.name AS invoice_name
+        FROM `tabSales Invoice` inv
+        LEFT JOIN (
+            SELECT combined.invoice AS invoice, combined.source_warehouse AS source_warehouse
+            FROM (
+                SELECT sii.parent AS invoice, dn.set_warehouse AS source_warehouse
+                FROM `tabSales Invoice Item` sii
+                INNER JOIN `tabDelivery Note` dn ON dn.name = sii.delivery_note
+                WHERE sii.delivery_note IS NOT NULL AND sii.delivery_note != ''
+
+                UNION
+
+                SELECT dni.against_sales_invoice AS invoice, dn2.set_warehouse AS source_warehouse
+                FROM `tabDelivery Note Item` dni
+                INNER JOIN `tabDelivery Note` dn2 ON dn2.name = dni.parent AND dn2.docstatus = 1
+                WHERE dni.against_sales_invoice IS NOT NULL AND dni.against_sales_invoice != ''
+            ) combined
+        ) dn_wh ON dn_wh.invoice = inv.name
+        WHERE
+            (inv.update_stock = 1 AND inv.set_warehouse {operator} %({param_prefix}_warehouse)s)
+            OR (inv.update_stock = 0 AND dn_wh.source_warehouse {operator} %({param_prefix}_warehouse)s)
     ) {alias} ON {alias}.invoice_name = {invoice_alias}.name""")
 		params[f"{param_prefix}_warehouse"] = list(warehouse) if operator == "IN" else warehouse
 
@@ -100,7 +139,7 @@ def _scope_join(invoice_alias, warehouse, sales_person, param_prefix):
 	return "\n".join(joins), params
 
 
-def _build_query(from_date, to_date, warehouse, sales_person, company):
+def _build_query(from_date, to_date, warehouse, sales_person, company, customer=None):
 	params = {"from_date": from_date, "to_date": to_date}
 
 	si_scope_sql, si_scope_params = _scope_join("si", warehouse, sales_person, "si_scope")
@@ -116,6 +155,13 @@ def _build_query(from_date, to_date, warehouse, sales_person, company):
 		params["company"] = company
 		company_clause_si = "AND si.company = %(company)s"
 		company_clause_sr = "AND sr.company = %(company)s"
+
+	customer_clause_si = ""
+	customer_clause_sr = ""
+	if customer:
+		params["customer"] = customer
+		customer_clause_si = "AND si.customer = %(customer)s"
+		customer_clause_sr = "AND sr.customer = %(customer)s"
 
 	query = f"""
 SELECT * FROM (
@@ -240,7 +286,7 @@ SELECT * FROM (
         GROUP BY base.original_invoice
     ) ret_data ON ret_data.invoice = si.name
 
-    LEFT JOIN (
+    INNER JOIN (
         SELECT
             per.reference_name                                              AS invoice,
             GROUP_CONCAT(DISTINCT pe.name
@@ -251,6 +297,7 @@ SELECT * FROM (
             ON pe.name = per.parent
             AND pe.docstatus = 1
             AND pe.payment_type = 'Receive'
+            AND pe.posting_date BETWEEN %(from_date)s AND %(to_date)s
         WHERE per.reference_doctype = 'Sales Invoice'
         GROUP BY per.reference_name
     ) pe_data ON pe_data.invoice = si.name
@@ -258,8 +305,8 @@ SELECT * FROM (
     WHERE
         si.docstatus     = 1
         AND si.is_return = 0
-        AND si.posting_date BETWEEN %(from_date)s AND %(to_date)s
         {company_clause_si}
+        {customer_clause_si}
 
     /* ============================================================
        PART 2 — Standalone Returns
@@ -333,6 +380,7 @@ SELECT * FROM (
         AND sr.posting_date BETWEEN %(from_date)s AND %(to_date)s
         AND ABS(sr.outstanding_amount) > 0.009
         {company_clause_sr}
+        {customer_clause_sr}
 
 ) AS combined_result
 ORDER BY posting_date ASC, sales_invoice ASC

@@ -39,6 +39,14 @@
    "wildcard_filter": 0
   },
   {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Customer",
+   "mandatory": 0,
+   "options": "Customer",
+   "wildcard_filter": 0
+  },
+  {
    "fieldname": "company",
    "fieldtype": "Link",
    "label": "Company",

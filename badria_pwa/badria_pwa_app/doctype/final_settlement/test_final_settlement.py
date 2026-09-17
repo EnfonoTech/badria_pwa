@@ -10,13 +10,13 @@
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
+from frappe.tests.utils import FrappeTestCase
 from frappe.utils import getdate
 
-from badria_pwa.api.final_settlement import _compute_settlement
+from badria_pwa.api.final_settlement import _compute_settlement, _get_attendance
 
 
-class IntegrationTestFinalSettlement(IntegrationTestCase):
+class IntegrationTestFinalSettlement(FrappeTestCase):
     def test_settlement_formula_matches_client_reference_sheet(self):
         # Reproduces the client's own reference settlement sheet exactly:
         # Basic 2000, 180 days worked, 6422 bags produced, 362 Other Additions,
@@ -103,13 +103,15 @@ class IntegrationTestFinalSettlement(IntegrationTestCase):
         self.assertEqual(result["additional_production"], 0.0)
         self.assertEqual(result["incentive_amount"], 0.0)
 
-    def test_below_minimum_days_do_not_reduce_working_days_or_salary(self):
+    def test_below_minimum_days_do_not_reduce_working_days(self):
         # 2 of the 30 present days have a Production Entry recorded below the
         # 20/day minimum. Below-minimum days are tracked (and above_minimum_days
-        # reported for reference) but do NOT reduce working_days or
-        # total_basic_salary - only actual Attendance absences do that. The
-        # below_minimum_incentive_amount is a manual entry that still flows
-        # into gross_settlement / balance_payable.
+        # reported for reference) but do NOT reduce working_days - only actual
+        # Attendance absences do that. The below_minimum_incentive_amount is a
+        # manual entry that IS deducted directly from gross_settlement (it's
+        # a deduction, not a separate incentive record) - but it must NOT
+        # reduce total_basic_salary, which always reports the pure
+        # basic/30*working_days formula.
         doc = frappe._dict(
             employee="_TEST-EMP-001",
             settlement_type="Production",
@@ -146,15 +148,15 @@ class IntegrationTestFinalSettlement(IntegrationTestCase):
         self.assertEqual(result["above_minimum_days"], 28.0)
         # working_days stays the full 30 - below-minimum does not reduce it
         self.assertEqual(result["working_days"], 30.0)
-        # total_basic_salary = 3000 * (30/30) = 3000 - unaffected
+        # total_basic_salary = 3000 * (30/30) = 3000 (below-minimum does NOT apply here)
         self.assertEqual(result["total_basic_salary"], 3000.0)
         # minimum_required_production = 30 * 20 = 600; additional = 700-600=100
         self.assertEqual(result["additional_production"], 100.0)
         # incentive_amount = 100 * 4 = 400
         self.assertEqual(result["incentive_amount"], 400.0)
-        # gross_settlement = 3000 + 400 + 50 (manual below-minimum) + 0 + 0 - 0 = 3450
-        self.assertEqual(result["gross_settlement"], 3450.0)
-        self.assertEqual(result["balance_payable"], 3450.0)
+        # gross_settlement = 3000 + 400 + 0 + 0 - 0 - 50 (below-minimum deduction) = 3350
+        self.assertEqual(result["gross_settlement"], 3350.0)
+        self.assertEqual(result["balance_payable"], 3350.0)
 
     def test_sales_settlement_formula_matches_client_reference_sheet(self):
         # Reproduces the client's Sales employee reference settlement sheet
@@ -274,3 +276,35 @@ class IntegrationTestFinalSettlement(IntegrationTestCase):
         self.assertEqual(result["total_payment_entry_paid"], 300.0)
         # balance_payable = 3000 - 500 - 300 = 2,200
         self.assertEqual(result["balance_payable"], 2200.0)
+
+    def test_get_attendance_sales_counts_paid_leave_but_not_lwp(self):
+        # Real Attendance + Leave Type records (rolled back after the test) to
+        # verify _get_attendance itself, not just the arithmetic around it.
+        # "Leave Without Pay" (is_lwp=1) must NOT add to payment days for Sales;
+        # a fully paid leave type ("Sick Leave", is_lwp=0/is_ppl=0) must.
+        employee = frappe.get_all("Employee", limit=1, pluck="name")[0]
+        from_date = getdate("2026-02-01")
+        to_date = getdate("2026-02-28")
+
+        attendance_days = [
+            (getdate("2026-02-01"), "Present", None),
+            (getdate("2026-02-02"), "Present", None),
+            (getdate("2026-02-03"), "On Leave", "Sick Leave"),
+            (getdate("2026-02-04"), "On Leave", "Leave Without Pay"),
+            (getdate("2026-02-05"), "Absent", None),
+        ]
+        for attendance_date, status, leave_type in attendance_days:
+            doc = frappe.new_doc("Attendance")
+            doc.employee = employee
+            doc.attendance_date = attendance_date
+            doc.status = status
+            if leave_type:
+                doc.leave_type = leave_type
+            doc.insert(ignore_permissions=True)
+            doc.submit()
+
+        # Production: only the 2 Present days count - On Leave and Absent are unpaid.
+        self.assertEqual(_get_attendance(employee, from_date, to_date, "Production"), 2.0)
+        # Sales: 2 Present + 1 paid Sick Leave day = 3. The LWP day and the
+        # Absent day do not add to payment days.
+        self.assertEqual(_get_attendance(employee, from_date, to_date, "Sales"), 3.0)
