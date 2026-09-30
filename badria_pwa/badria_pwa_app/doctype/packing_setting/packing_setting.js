@@ -22,8 +22,14 @@ frappe.ui.form.on("Packing Material Rule", {
 			frappe.db.get_value("Item", row.packing_material_item, "stock_uom", (r) => {
 				frappe.model.set_value(cdt, cdn, "uom", r.stock_uom);
 			});
+			frappe.call({
+				method: "badria_pwa.badria_pwa_app.doctype.packing_setting.packing_setting.get_item_default_warehouse",
+				args: { item_code: row.packing_material_item },
+				callback: (r) => frappe.model.set_value(cdt, cdn, "warehouse", r.message || ""),
+			});
 		} else {
 			frappe.model.set_value(cdt, cdn, "uom", "");
+			frappe.model.set_value(cdt, cdn, "warehouse", "");
 		}
 	},
 });
