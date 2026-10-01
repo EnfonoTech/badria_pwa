@@ -109,7 +109,8 @@ def apply_packing_rules(doc, method=None):
 
 			required_qty[rule.packing_material_item] = required_qty.get(rule.packing_material_item, 0) + qty
 			source_warehouse_by_item.setdefault(
-				rule.packing_material_item, _get_source_warehouse(doc, rule.packing_material_item)
+				rule.packing_material_item,
+				_get_source_warehouse(doc, rule.packing_material_item, rule.get("warehouse")),
 			)
 
 	if not required_qty:
@@ -139,15 +140,19 @@ def apply_packing_rules(doc, method=None):
 		)
 
 
-def _get_source_warehouse(doc, item_code):
+def _get_source_warehouse(doc, item_code, rule_warehouse=None):
 	"""Where to consume this packing material from.
 
-	Priority: the Stock Entry's own "Default Source Warehouse" header field
-	(if the operator set one), else the packing material Item's own default
+	Priority: the Warehouse set on the Packing Setting row (if it belongs to
+	this Stock Entry's company), else the Stock Entry's own "Default Source
+	Warehouse" header field (if the operator set one), else the packing material Item's own default
 	warehouse for this company (Item > item_defaults, the standard ERPNext
 	place to configure "this item always comes from warehouse X") - so the
 	common case needs no per-entry setup at all.
 	"""
+	if rule_warehouse and frappe.db.get_value("Warehouse", rule_warehouse, "company") == doc.company:
+		return rule_warehouse
+
 	if doc.from_warehouse:
 		return doc.from_warehouse
 

@@ -30,3 +30,25 @@ def get_packing_item_uoms(doctype, txt, searchfield, start, page_len, filters):
 		order_by="idx",
 		as_list=1,
 	)
+
+
+@frappe.whitelist()
+def get_item_default_warehouse(item_code, company=None):
+	"""Item > Item Defaults warehouse, for the default company if it has a row,
+	else the first Item Default row that has a warehouse."""
+	frappe.has_permission("Item", "read", doc=item_code, throw=True)
+
+	company = company or frappe.defaults.get_user_default("Company")
+	if company:
+		warehouse = frappe.db.get_value(
+			"Item Default", {"parent": item_code, "company": company}, "default_warehouse"
+		)
+		if warehouse:
+			return warehouse
+
+	return frappe.db.get_value(
+		"Item Default",
+		{"parent": item_code, "default_warehouse": ["is", "set"]},
+		"default_warehouse",
+		order_by="idx",
+	)
