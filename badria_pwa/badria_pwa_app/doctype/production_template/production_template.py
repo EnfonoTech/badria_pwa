@@ -29,10 +29,8 @@ class ProductionTemplate(Document):
 					% row.idx
 				)
 
-			if row.is_finished_item and row.is_scrap_item:
-				frappe.throw(
-					_("Row #%d: a row cannot be both a finished item and a scrap item.") % row.idx
-				)
+			# Finished + scrap on one row is allowed: on a Production (Repack)
+			# entry wastage is a finished good that may also be flagged scrap.
 
 			if flt(row.qty) < 0:
 				frappe.throw(_("Row #%d: Qty cannot be negative.") % row.idx)
