@@ -29,6 +29,13 @@ doc_events = {
     },
 }
 
+# Production (Repack) cost allocation lives in the controller, not in a
+# doc_event: a backdated repost recalculates Stock Entry rates by calling
+# calculate_rate_and_amount() directly, which never fires doc_events.
+override_doctype_class = {
+    "Stock Entry": "badria_pwa.manufacturing.production_costing.BadriaStockEntry",
+}
+
 # Form scripts. Needs `bench build --app badria_pwa` after install/update.
 doctype_js = {
     "Stock Entry": "public/js/stock_entry.js",
@@ -50,12 +57,13 @@ fixtures = [
 					"Stock Entry-custom_shift_employees_section",
 					"Stock Entry-custom_shift_employees",
 					"Stock Entry-custom_production_template",
-					"Item-custom_packing_automation_section",
-					"Item-custom_enable_packing_automation",
-					"Item-custom_pieces_per_carton",
-					"Item-custom_packing_materials",
+					"Stock Entry-custom_packing_allocation_section",
+					"Stock Entry-custom_packing_allocation",
+					"Stock Entry Detail-custom_is_auto_packing",
+					"Stock Entry Detail-custom_weight_kg",
 				],
 			]
 		],
 	},
+	{"dt": "Stock Entry Type", "filters": [["name", "in", ["Production"]]]},
 ]

@@ -47,6 +47,22 @@ class ProductionTemplate(Document):
 			return
 
 		purpose = frappe.db.get_value("Stock Entry Type", self.stock_entry_type, "purpose")
+		if purpose == "Repack":
+			# Repack treats every target-only row as a finished good. A flagged
+			# row with no warehouse of its own is produced too: get_template_items
+			# puts it into the default target warehouse.
+			if not any(
+				(row.t_warehouse or row.is_finished_item or row.is_scrap_item) and not row.s_warehouse
+				for row in self.items
+			):
+				frappe.throw(
+					_(
+						"A Repack template needs at least one produced row (Target Warehouse only),"
+						" otherwise the Stock Entry has no finished goods."
+					)
+				)
+			return
+
 		if purpose != "Manufacture":
 			return
 

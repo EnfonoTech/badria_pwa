@@ -1,6 +1,6 @@
 # badria_pwa.manufacturing.packing_automation - Auto-consumes packing
-# materials (boxes, pouches, ...) on a Manufacture Stock Entry, so the
-# operator only ever types the finished goods quantity.
+# materials (boxes, pouches, ...) on a Manufacture or Production (Repack)
+# Stock Entry, so the operator only ever types the finished goods quantity.
 #
 # Configured via the standalone "Packing Setting" DocType, one record per
 # finished Item (name = the Item code):
@@ -15,6 +15,8 @@
 #     Per Pouch   qty_per_unit = how many Pouches this material holds (e.g.
 #                 Pouches per Box), rounded UP - a part-full box still needs
 #                 a whole box
+#   qty_per_unit is in the rule's own UOM; it is converted to the packing
+#   material's stock UOM before it is written to the Stock Entry.
 # A finished item with no "Packing Setting" record is simply not automated.
 #
 # Example (matches the "Samoosa Hadi" packing rules):
@@ -24,6 +26,23 @@
 #
 # 45 finished pieces  -> Pouch = 45         -> Box = ceil(45  / 10) = 5
 # 205 finished pieces -> Pouch = 205        -> Box = ceil(205 / 10) = 21
+#
+# Finished quantities are always read in stock UOM (qty x conversion factor),
+# so a "25 Carton" row counts as 200 pieces, not 25.
+#
+# A row entered in the stock UOM (e.g. "8 Nos") is LOOSE pieces: it gets its
+# Per Piece material (the pouch) but no box - the Per Carton and Per Pouch
+# rules, which both describe the box the pieces are packed in, apply only to
+# rows entered in a packed UOM such as Carton.
+#
+# The Stock Entry gets ONE auto row per packing material (flagged
+# custom_is_auto_packing) holding the combined qty. On a Production entry the
+# per-product split is also written to custom_packing_allocation, which
+# production_costing uses to charge each product with its own packing - it is
+# stored rather than recomputed so a later backdated repost splits the cost
+# exactly as it was split on the day, even if the Packing Setting has changed.
+# Extra or damaged packing is entered as a normal (unflagged) row: it is left
+# alone here and costed with the common raw material.
 
 import math
 
@@ -31,96 +50,57 @@ import frappe
 from frappe import _
 from frappe.utils import cint, flt
 
+from badria_pwa.manufacturing import is_production_entry
+
 
 def apply_packing_rules(doc, method=None):
-	"""doc_events hook: Stock Entry validate.
+	"""doc_events hook: Stock Entry before_validate.
 
 	Runs on every save, including the save that happens as part of submit,
-	so packing rows always reflect the latest finished qty and an
+	so the auto packing rows always reflect the latest finished qty and an
 	insufficient-stock error blocks submission the same way any other
 	mandatory validation would.
 
-	Only Manufacture entries qualify, and only rows with "Is Finished Item"
-	ticked are read for packing rules - a plain consumption/transfer row
-	never triggers this, and other Stock Entry purposes (Material Transfer,
-	Material Issue, Repack, ...) are skipped entirely via the purpose check
-	below.
+	Only Manufacture entries and Production (Repack) entries qualify. The
+	finished rows are the "Is Finished Item" rows on a Manufacture entry, and
+	every target-only row on a Production entry (core Repack marks those as
+	finished later in validate(), after this hook has run).
 
-	A single entry can produce more than one finished item (e.g. two flavors
-	in one batch); each ticked row is resolved against its own Item's
-	packing rules and carton size, then the packing-material quantities are
-	summed across finished items before writing rows - so if two finished
-	items both consume "Box", the Stock Entry ends up with one Box row for
-	the combined qty instead of the second finished item's rules
-	overwriting the first's.
+	Quantities are summed per packing material across all finished items, so
+	two products that both consume "Box" end up sharing one Box row.
 	"""
-	if doc.purpose != "Manufacture":
+	production = is_production_entry(doc)
+	if doc.purpose != "Manufacture" and not production:
 		return
 
-	finished_rows = [row for row in doc.items if row.is_finished_item and flt(row.qty) > 0]
-	if not finished_rows:
-		return
-
-	required_qty = {}  # packing_material_item -> total qty across all finished items
+	required_qty = {}  # packing_material_item -> total qty (stock UOM)
+	allocation = {}  # (finished item, packing_material_item) -> qty (stock UOM)
 	source_warehouse_by_item = {}
 
-	for row in finished_rows:
-		if not frappe.db.exists("Packing Setting", row.item_code):
+	for row in doc.items:
+		if not _is_finished_row(row, production):
 			continue
 
-		setting = frappe.get_cached_doc("Packing Setting", row.item_code)
-		rules = setting.get("packing_materials") or []
-		if not rules:
+		finished_qty = _stock_qty(row)
+		if finished_qty <= 0 or not frappe.db.exists("Packing Setting", row.item_code):
 			continue
 
-		per_piece_rules = [r for r in rules if r.rule_type == "Per Piece"]
-		per_pouch_rules = [r for r in rules if r.rule_type == "Per Pouch"]
-		if per_pouch_rules and len(per_piece_rules) != 1:
-			frappe.throw(
-				_(
-					"Item {0}: a 'Per Pouch' packing rule needs exactly one 'Per Piece' rule to"
-					" define the Pouch quantity it divides into (found {1})."
-				).format(frappe.bold(row.item_code), len(per_piece_rules))
-			)
-		pouch_qty = flt(row.qty) * flt(per_piece_rules[0].qty_per_unit or 0) if per_piece_rules else 0
-
-		carton_count = 0
-		if any(r.rule_type == "Per Carton" for r in rules):
-			pieces_per_carton = cint(setting.pieces_per_carton)
-			if pieces_per_carton <= 0:
-				frappe.throw(
-					_("Item {0} has a 'Per Carton' packing rule but Pieces Per Carton is not set.").format(
-						frappe.bold(row.item_code)
-					)
-				)
-			carton_count = int(flt(row.qty) // pieces_per_carton)
-
-		for rule in rules:
-			if rule.rule_type == "Per Carton":
-				qty = flt(carton_count) * flt(rule.qty_per_unit or 0)
-			elif rule.rule_type == "Per Piece":
-				qty = flt(row.qty) * flt(rule.qty_per_unit or 0)
-			else:  # Per Pouch
-				pouches_per_unit = flt(rule.qty_per_unit or 0)
-				qty = math.ceil(pouch_qty / pouches_per_unit) if pouches_per_unit > 0 else 0
-
-			if qty <= 0:
-				continue
-
-			required_qty[rule.packing_material_item] = required_qty.get(rule.packing_material_item, 0) + qty
+		for packing_item, qty, rule in _packing_requirements(row.item_code, finished_qty, _is_loose(row)):
+			required_qty[packing_item] = required_qty.get(packing_item, 0) + qty
+			key = (row.item_code, packing_item)
+			allocation[key] = allocation.get(key, 0) + qty
 			source_warehouse_by_item.setdefault(
-				rule.packing_material_item,
-				_get_source_warehouse(doc, rule.packing_material_item, rule.get("warehouse")),
+				packing_item,
+				_get_source_warehouse(doc, packing_item, rule.get("warehouse")),
 			)
 
-	if not required_qty:
-		return
+	_sync_auto_rows(doc, required_qty, source_warehouse_by_item)
+	if production:
+		_set_packing_allocation(doc, allocation)
 
 	shortages = []
 	for item_code, qty in required_qty.items():
 		source_warehouse = source_warehouse_by_item[item_code]
-		_upsert_packing_row(doc, item_code, qty, source_warehouse)
-
 		available_qty = flt(
 			frappe.db.get_value("Bin", {"item_code": item_code, "warehouse": source_warehouse}, "actual_qty")
 		)
@@ -138,6 +118,82 @@ def apply_packing_rules(doc, method=None):
 			),
 			title=_("Insufficient Packing Material Stock"),
 		)
+
+
+def _is_finished_row(row, production):
+	if row.get("custom_is_auto_packing"):
+		return False
+	if production:
+		return bool(row.t_warehouse and not row.s_warehouse)
+	return bool(row.is_finished_item)
+
+
+def _stock_qty(row):
+	# Runs before core validate() has filled conversion_factor, so a row
+	# created through the API with only uom = "Carton" must be resolved here.
+	factor = flt(row.conversion_factor) or _uom_factor(row.item_code, row.uom)
+	return flt(row.qty) * factor
+
+
+def _is_loose(row):
+	stock_uom = row.stock_uom or frappe.get_cached_value("Item", row.item_code, "stock_uom")
+	return not row.uom or row.uom == stock_uom
+
+
+def _packing_requirements(finished_item, finished_qty, loose=False):
+	"""Yield (packing_material_item, qty in its stock UOM, rule) for one
+	finished row of `finished_qty` pieces. Loose rows skip the box rules."""
+	setting = frappe.get_cached_doc("Packing Setting", finished_item)
+	rules = setting.get("packing_materials") or []
+	if not rules:
+		return
+
+	per_piece_rules = [r for r in rules if r.rule_type == "Per Piece"]
+	per_pouch_rules = [r for r in rules if r.rule_type == "Per Pouch"]
+	if per_pouch_rules and len(per_piece_rules) != 1:
+		frappe.throw(
+			_(
+				"Item {0}: a 'Per Pouch' packing rule needs exactly one 'Per Piece' rule to"
+				" define the Pouch quantity it divides into (found {1})."
+			).format(frappe.bold(finished_item), len(per_piece_rules))
+		)
+	pouch_qty = finished_qty * flt(per_piece_rules[0].qty_per_unit or 0) if per_piece_rules else 0
+
+	carton_count = 0
+	if any(r.rule_type == "Per Carton" for r in rules):
+		pieces_per_carton = cint(setting.pieces_per_carton)
+		if pieces_per_carton <= 0:
+			frappe.throw(
+				_("Item {0} has a 'Per Carton' packing rule but Pieces Per Carton is not set.").format(
+					frappe.bold(finished_item)
+				)
+			)
+		carton_count = int(finished_qty // pieces_per_carton)
+
+	for rule in rules:
+		if loose and rule.rule_type in ("Per Carton", "Per Pouch"):
+			continue
+		if rule.rule_type == "Per Carton":
+			qty = flt(carton_count) * flt(rule.qty_per_unit or 0)
+		elif rule.rule_type == "Per Piece":
+			qty = finished_qty * flt(rule.qty_per_unit or 0)
+		else:  # Per Pouch
+			pouches_per_unit = flt(rule.qty_per_unit or 0)
+			qty = math.ceil(pouch_qty / pouches_per_unit) if pouches_per_unit > 0 else 0
+
+		qty = qty * _uom_factor(rule.packing_material_item, rule.uom)
+		if qty > 0:
+			yield rule.packing_material_item, qty, rule
+
+
+def _uom_factor(item_code, uom):
+	"""How many stock-UOM units one `uom` of this item is (1 when uom is blank
+	or already the stock UOM)."""
+	from erpnext.stock.get_item_details import get_conversion_factor
+
+	if not uom:
+		return 1.0
+	return flt(get_conversion_factor(item_code, uom).get("conversion_factor")) or 1.0
 
 
 def _get_source_warehouse(doc, item_code, rule_warehouse=None):
@@ -171,30 +227,64 @@ def _get_source_warehouse(doc, item_code, rule_warehouse=None):
 	)
 
 
-def _upsert_packing_row(doc, item_code, qty, source_warehouse):
-	"""Update the row for this packing material if it is already on the
-	Stock Entry, else append a new consumption row."""
+def _sync_auto_rows(doc, required_qty, source_warehouse_by_item):
+	"""Make the flagged auto rows match required_qty exactly: update the row
+	of each required material, add missing ones, and drop auto rows that are
+	no longer needed (finished qty went down, product removed, rule changed).
+	Unflagged rows are the operator's own and are never touched."""
+	seen = set()
+	stale = []
 	for row in doc.items:
-		if row.item_code == item_code and not row.is_finished_item:
-			row.qty = qty
-			row.transfer_qty = flt(qty) * flt(row.conversion_factor or 1)
-			row.s_warehouse = source_warehouse
-			return row
+		if not row.get("custom_is_auto_packing"):
+			continue
+		if row.item_code not in required_qty or row.item_code in seen:
+			stale.append(row)
+			continue
+		seen.add(row.item_code)
+		_set_packing_row(row, required_qty[row.item_code], source_warehouse_by_item[row.item_code])
 
-	item_meta = frappe.get_cached_doc("Item", item_code)
-	return doc.append(
-		"items",
-		{
-			"item_code": item_code,
-			"item_name": item_meta.item_name,
-			"qty": qty,
-			"stock_uom": item_meta.stock_uom,
-			"uom": item_meta.stock_uom,
-			"conversion_factor": 1,
-			"transfer_qty": qty,
-			"s_warehouse": source_warehouse,
-			"is_finished_item": 0,
-			"cost_center": item_meta.get("buying_cost_center"),
-			"expense_account": item_meta.get("expense_account"),
-		},
-	)
+	if stale:
+		doc.items = [row for row in doc.items if row not in stale]
+		for idx, row in enumerate(doc.items, start=1):
+			row.idx = idx
+
+	for item_code, qty in required_qty.items():
+		if item_code in seen:
+			continue
+		item_meta = frappe.get_cached_doc("Item", item_code)
+		row = doc.append(
+			"items",
+			{
+				"item_code": item_code,
+				"item_name": item_meta.item_name,
+				"stock_uom": item_meta.stock_uom,
+				"is_finished_item": 0,
+				"custom_is_auto_packing": 1,
+				"cost_center": item_meta.get("buying_cost_center"),
+				"expense_account": item_meta.get("expense_account"),
+			},
+		)
+		_set_packing_row(row, qty, source_warehouse_by_item[item_code])
+
+
+def _set_packing_row(row, qty, source_warehouse):
+	row.qty = qty
+	row.uom = row.stock_uom or frappe.get_cached_value("Item", row.item_code, "stock_uom")
+	row.conversion_factor = 1
+	row.transfer_qty = qty
+	row.s_warehouse = source_warehouse
+	row.t_warehouse = None
+
+
+def _set_packing_allocation(doc, allocation):
+	doc.set("custom_packing_allocation", [])
+	for (finished_item, packing_item), qty in sorted(allocation.items()):
+		doc.append(
+			"custom_packing_allocation",
+			{
+				"finished_item": finished_item,
+				"packing_material_item": packing_item,
+				"qty": qty,
+				"stock_uom": frappe.get_cached_value("Item", packing_item, "stock_uom"),
+			},
+		)

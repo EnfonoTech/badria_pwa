@@ -9,3 +9,4 @@ badria_pwa.patches.v1_0.create_fixed_divisor_salary_structure
 badria_pwa.patches.v1_0.fix_daily_wage_double_proration
 badria_pwa.patches.v1_0.cancel_unused_fixed_divisor_structure
 badria_pwa.patches.v1_0.cleanup_old_stock_entry_shift_info
+badria_pwa.patches.v1_0.remove_item_packing_custom_fields

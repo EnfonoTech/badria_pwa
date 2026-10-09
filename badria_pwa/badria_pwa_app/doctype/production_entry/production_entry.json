@@ -8,6 +8,7 @@
   "naming_series",
   "employee",
   "employee_name",
+  "supervisor",
   "date",
   "column_break_emp",
   "production_quantity",
@@ -39,6 +40,12 @@
    "fieldtype": "Data",
    "label": "Employee Name",
    "read_only": 1
+  },
+  {
+   "fieldname": "supervisor",
+   "fieldtype": "Link",
+   "label": "Supervisor",
+   "options": "Employee"
   },
   {
    "fieldname": "date",
@@ -91,7 +98,7 @@
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-08-07 00:00:04.000000",
+ "modified": "2026-10-08 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Badria PWA App",
  "name": "Production Entry",
